@@ -1000,12 +1000,12 @@ for (let key in objects.datasets) {
                         field: "value",
                         type: "quantitative",
                         scale: {
-                            range: ["darkred", "white"],
+                            range: ["white", "darkblue"],
                             interpolate: "cubehelix",
                             domainMax: 1.0
                         },
                         legend: {
-                            title: "Distance"
+                            title: "Similarity"
                         }
                     },
 
