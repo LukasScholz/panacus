@@ -877,84 +877,304 @@ for (let key in objects.datasets) {
             });
         });
 
-    } else if (element instanceof Heatmap) {
-        let h = element;
-        let thisId = 'chart-heatmap-' + h.id;
-        // buildPlotDownload(myChart, h.id, fname);
-        let mySpec = {
-            "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
-            "description": "Heatmap",
-            "data": h.data_set,
-            "width": 800,
-            "height": 800,
-            "mark": {
-                "type": "rect",
-                "tooltip": true,
-            },
-            "encoding": {
-                "y": {
-                    "field": "y",
-                    "type": "ordinal",
-                    "sort": null,
-                    "axis": {
-                        "labelOverlap": "greedy"
-                    }
-                },
-                "x": {
-                    "field": "x",
-                    "type": "ordinal",
-                    "sort": null,
-                    "axis": {
-                        "labelOverlap": "greedy"
-                    }
-                },
-                "color": {
-                    "field": "value",
-                    "type": "quantitative",
-                    "scale": {"range": ["darkred", "white"], "interpolate": "cubehelix", "domainMax": 1.0}
-                },
-            }
-        };
 
-        let opt = {
-            "actions": false,
-        };
-        vegaEmbed(`#${CSS.escape(thisId)}`, mySpec, opt).then(({ view, spec, vgSpec }) => {
-            // Export PNG
-            let png_button = document.getElementById('btn-download-plot-png-' + h.id);
-            png_button.addEventListener('click', () => {
-                view.toImageURL('png').then(url => {
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = 'visualization.png';
-                    a.click();
-                });
-            });
+} else if (element instanceof Heatmap) {
+    const h = element;
+    const thisId = 'chart-heatmap-' + h.id;
 
-            // Export SVG
-            let svg_button = document.getElementById('btn-download-plot-svg-' + h.id);
-            svg_button.removeEventListener('click', svg_button);
-            svg_button.addEventListener('click', function svg_button() {
-                view.toImageURL('svg').then(url => {
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = 'visualization.svg';
-                    a.click();
-                });
-            });
+    // ------------------------------------------------------------
+    // 1. Prepare the data
+    // ------------------------------------------------------------
+    const sourceValues = Array.isArray(h.data_set)
+        ? h.data_set
+        : h.data_set?.values;
 
-            // Open in Vega Editor
-            let vega_editor_button = document.getElementById('btn-download-plot-vega-editor-' + h.id);
-            vega_editor_button.addEventListener('click', () => {
-                post_to_vega_editor(window, {
-                    mode: 'vega-lite',
-                    spec: JSON.stringify(spec, null, 2),
-                    renderer: undefined,
-                    config: undefined,
-                });
-            });
+    if (!Array.isArray(sourceValues)) {
+        throw new Error(
+            'Heatmap requires h.data_set.values to be an array ' +
+            'of {x, y, value} records.'
+        );
+    }
+
+    // Preserve the original order of the sample labels.
+    const labels = [...new Set(sourceValues.map(d => d.x))];
+    const index = new Map(
+        labels.map((label, i) => [label, i])
+    );
+
+    const n = labels.length;
+
+    // Keep only the upper triangle, excluding the diagonal.
+    // Transform the coordinates into a 45-degree diamond layout.
+    const cells = sourceValues
+        .filter(d => {
+            const row = index.get(d.y);
+            const col = index.get(d.x);
+
+            return row !== undefined &&
+                   col !== undefined &&
+                   row < col;
+        })
+        .map(d => {
+            const i = index.get(d.y);
+            const j = index.get(d.x);
+
+            return {
+                x: d.x,
+                y: d.y,
+                value: d.value,
+
+                // Rotated-grid coordinates.
+                xRot: j - i,
+                yRot: i + j
+            };
         });
-    } else if (element instanceof VegaPlot) {
+
+    // Labels are a separate layer, so they stay horizontal.
+    // Position them beside the left edge of the diamond grid.
+    const labelData = labels.map((label, i) => ({
+        label: label,
+        xRot: -1.25,
+        yRot: 2 * i + 1
+    }));
+
+    // ------------------------------------------------------------
+    // 2. Layout settings
+    // ------------------------------------------------------------
+    const cellSize = n > 35 ? 14 : n > 20 ? 18 : 26;
+
+    const plotWidth = Math.max(
+        200,
+        Math.ceil((n + 2) * cellSize)
+    );
+
+    const plotHeight = Math.max(
+        150,
+        Math.ceil(2 * n * cellSize)
+    );
+
+    // Vega point size is expressed in square points.
+    // Tune this factor if your renderer shows gaps or overlaps.
+    const diamondSize = cellSize * cellSize * 2;
+
+    // ------------------------------------------------------------
+    // 3. Vega-Lite specification
+    // ------------------------------------------------------------
+    const mySpec = {
+        $schema: "https://vega.github.io/schema/vega-lite/v6.json",
+        description: "Stained-glass upper-triangle heatmap",
+
+        width: plotWidth,
+        height: plotHeight,
+
+        background: "white",
+
+        layer: [
+            {
+                // Diamond-shaped heatmap cells.
+                data: {
+                    values: cells
+                },
+
+                mark: {
+                    type: "point",
+                    shape: "diamond",
+                    filled: true,
+                    size: diamondSize,
+                    stroke: "white",
+                    strokeWidth: 0.5,
+                    tooltip: true
+                },
+
+                encoding: {
+                    x: {
+                        field: "xRot",
+                        type: "quantitative",
+                        scale: {
+                            domain: [-2, n],
+                            nice: false,
+                            zero: false
+                        },
+                        axis: null
+                    },
+
+                    y: {
+                        field: "yRot",
+                        type: "quantitative",
+                        scale: {
+                            domain: [2 * n, 0],
+                            nice: false,
+                            zero: false
+                        },
+                        axis: null
+                    },
+
+                    color: {
+                        field: "value",
+                        type: "quantitative",
+                        scale: {
+                            range: ["darkred", "white"],
+                            interpolate: "cubehelix",
+                            domainMax: 1.0
+                        },
+                        legend: {
+                            title: "Value"
+                        }
+                    },
+
+                    tooltip: [
+                        {
+                            field: "y",
+                            type: "nominal",
+                            title: "Row"
+                        },
+                        {
+                            field: "x",
+                            type: "nominal",
+                            title: "Column"
+                        },
+                        {
+                            field: "value",
+                            type: "quantitative",
+                            title: "Value",
+                            format: ".3f"
+                        }
+                    ]
+                }
+            },
+
+            {
+                // Horizontal labels along the left side.
+                data: {
+                    values: labelData
+                },
+
+                mark: {
+                    type: "text",
+                    align: "right",
+                    baseline: "middle",
+                    fontSize: n > 35 ? 10 : 13,
+                    color: "black"
+                },
+
+                encoding: {
+                    x: {
+                        field: "xRot",
+                        type: "quantitative",
+                        scale: {
+                            domain: [-2, n],
+                            nice: false,
+                            zero: false
+                        },
+                        axis: null
+                    },
+
+                    y: {
+                        field: "yRot",
+                        type: "quantitative",
+                        scale: {
+                            domain: [2 * n, 0],
+                            nice: false,
+                            zero: false
+                        },
+                        axis: null
+                    },
+
+                    text: {
+                        field: "label",
+                        type: "nominal"
+                    }
+                }
+            }
+        ],
+
+        resolve: {
+            scale: {
+                x: "shared",
+                y: "shared"
+            }
+        },
+
+        config: {
+            view: {
+                stroke: null
+            },
+            axis: {
+                grid: false
+            }
+        }
+    };
+
+    // ------------------------------------------------------------
+    // 4. Render and configure exports
+    // ------------------------------------------------------------
+    const opt = {
+        actions: false
+    };
+
+    vegaEmbed(`#${CSS.escape(thisId)}`, mySpec, opt)
+        .then(({ view, spec }) => {
+
+            // Helper to download the current chart as an image.
+            function downloadImage(format, filename) {
+                view.toImageURL(format).then(url => {
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                }).catch(err => {
+                    console.error(
+                        `Could not export heatmap as ${format}:`,
+                        err
+                    );
+                });
+            }
+
+            // PNG export.
+            const pngButton = document.getElementById(
+                'btn-download-plot-png-' + h.id
+            );
+
+            if (pngButton) {
+                pngButton.onclick = () => {
+                    downloadImage("png", "visualization.png");
+                };
+            }
+
+            // SVG export.
+            const svgButton = document.getElementById(
+                'btn-download-plot-svg-' + h.id
+            );
+
+            if (svgButton) {
+                svgButton.onclick = () => {
+                    downloadImage("svg", "visualization.svg");
+                };
+            }
+
+            // Open in Vega Editor.
+            const editorButton = document.getElementById(
+                'btn-download-plot-vega-editor-' + h.id
+            );
+
+            if (editorButton) {
+                editorButton.onclick = () => {
+                    post_to_vega_editor(window, {
+                        mode: "vega-lite",
+                        spec: JSON.stringify(spec, null, 2),
+                        renderer: undefined,
+                        config: undefined
+                    });
+                };
+            }
+        })
+        .catch(err => {
+            console.error("Could not render heatmap:", err);
+        });
+
+} else if (element instanceof VegaPlot) {
         let v = element;
         let thisId = 'chart-line-' + v.id;
         let opt = {
