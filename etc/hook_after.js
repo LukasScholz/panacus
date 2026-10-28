@@ -882,9 +882,6 @@ for (let key in objects.datasets) {
     const h = element;
     const thisId = 'chart-heatmap-' + h.id;
 
-    // ------------------------------------------------------------
-    // 1. Prepare the data
-    // ------------------------------------------------------------
     const sourceValues = Array.isArray(h.data_set)
         ? h.data_set
         : h.data_set?.values;
@@ -896,7 +893,6 @@ for (let key in objects.datasets) {
         );
     }
 
-    // Preserve the original order of the sample labels.
     const labels = [...new Set(sourceValues.map(d => d.x))];
     const index = new Map(
         labels.map((label, i) => [label, i])
@@ -904,8 +900,7 @@ for (let key in objects.datasets) {
 
     const n = labels.length;
 
-    // Keep only the upper triangle, excluding the diagonal.
-    // Transform the coordinates into a 45-degree diamond layout.
+    // Keep only the upper triangle
     const cells = sourceValues
         .filter(d => {
             const row = index.get(d.y);
@@ -930,17 +925,13 @@ for (let key in objects.datasets) {
             };
         });
 
-    // Labels are a separate layer, so they stay horizontal.
-    // Position them beside the left edge of the diamond grid.
     const labelData = labels.map((label, i) => ({
         label: label,
         xRot: -1.25,
-        yRot: 2 * i + 1
+        yRot: 2 * i
     }));
 
-    // ------------------------------------------------------------
-    // 2. Layout settings
-    // ------------------------------------------------------------
+    // Layout settings
     const cellSize = n > 35 ? 14 : n > 20 ? 18 : 26;
 
     const plotWidth = Math.max(
@@ -953,13 +944,11 @@ for (let key in objects.datasets) {
         Math.ceil(2 * n * cellSize)
     );
 
-    // Vega point size is expressed in square points.
-    // Tune this factor if your renderer shows gaps or overlaps.
-    const diamondSize = cellSize * cellSize * 2;
+    const diamond_scale = 1.5;
+    const diamondSize = cellSize * cellSize * 2 * diamond_scale;
 
-    // ------------------------------------------------------------
-    // 3. Vega-Lite specification
-    // ------------------------------------------------------------
+
+    // Vega-Lite specification
     const mySpec = {
         $schema: "https://vega.github.io/schema/vega-lite/v6.json",
         description: "Stained-glass upper-triangle heatmap",
@@ -981,8 +970,6 @@ for (let key in objects.datasets) {
                     shape: "diamond",
                     filled: true,
                     size: diamondSize,
-                    stroke: "white",
-                    strokeWidth: 0.5,
                     tooltip: true
                 },
 
@@ -1018,7 +1005,7 @@ for (let key in objects.datasets) {
                             domainMax: 1.0
                         },
                         legend: {
-                            title: "Value"
+                            title: "Distance"
                         }
                     },
 
@@ -1105,9 +1092,7 @@ for (let key in objects.datasets) {
         }
     };
 
-    // ------------------------------------------------------------
-    // 4. Render and configure exports
-    // ------------------------------------------------------------
+
     const opt = {
         actions: false
     };
