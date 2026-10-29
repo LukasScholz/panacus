@@ -880,9 +880,6 @@ for (let key in objects.datasets) {
 
 } else if (element instanceof Heatmap) {
     const h = element;
-    console.log("=============");
-    console.log(h.dendrogram);
-    console.log("===============");
     const thisId = 'chart-heatmap-' + h.id;
 
     const sourceValues = Array.isArray(h.data_set)
@@ -897,32 +894,25 @@ for (let key in objects.datasets) {
     }
 
     const labels = [...new Set(sourceValues.map(d => d.x))];
-    const index = new Map(
-        labels.map((label, i) => [label, i])
-    );
-
+    const index = new Map(labels.map((label, i) => [label, i]));
     const n = labels.length;
 
-    // Keep only the upper triangle
+    // ------------------------------------------------------------------
+    // Heatmap cells (unchanged)
+    // ------------------------------------------------------------------
     const cells = sourceValues
         .filter(d => {
             const row = index.get(d.y);
             const col = index.get(d.x);
-
-            return row !== undefined &&
-                   col !== undefined &&
-                   row < col;
+            return row !== undefined && col !== undefined && row < col;
         })
         .map(d => {
             const i = index.get(d.y);
             const j = index.get(d.x);
-
             return {
                 x: d.x,
                 y: d.y,
                 value: d.value,
-
-                // Rotated-grid coordinates.
                 xRot: j - i,
                 yRot: i + j
             };
@@ -934,40 +924,132 @@ for (let key in objects.datasets) {
         yRot: 2 * i
     }));
 
-    // Layout settings
+    // ------------------------------------------------------------------
+    // Dendrogram → line segments
+    // h.dendrogram = [{cluster1, cluster2, dissimilarity, size}, ...]
+    // Leaf indices 0..n-1 refer to the ORIGINAL order before reordering.
+    // Because the matrix/labels were already reordered to the dendrogram
+    // leaf order, we map original → current position via a leaf-order walk.
+    // ------------------------------------------------------------------
+    function linkageToSegments(steps, nLeaves) {
+        if (!steps || steps.length === 0) return [];
+
+        // Build children: node → [left, right]
+        const children = new Map();
+        const height = new Map();          // node → dissimilarity
+        for (let i = 0; i < nLeaves; i++) height.set(i, 0);
+
+        steps.forEach((s, k) => {
+            const node = nLeaves + k;     // kodama internal node ids
+            children.set(node, [s.cluster1, s.cluster2]);
+            height.set(node, s.dissimilarity);
+        });
+
+        const root = nLeaves + steps.length - 1;
+
+        // DFS leaf order (matches typical linkage leaf order)
+        const leafOrder = [];
+        function dfs(node) {
+            if (node < nLeaves) {
+                leafOrder.push(node);
+                return;
+            }
+            const [a, b] = children.get(node);
+            dfs(a);
+            dfs(b);
+        }
+        dfs(root);
+
+        // original leaf index → position along the heatmap (0 .. n-1)
+        const pos = new Map(leafOrder.map((leaf, i) => [leaf, i]));
+
+        // mid-point of every cluster in leaf-position space
+        const mid = new Map();
+        function getMid(node) {
+            if (mid.has(node)) return mid.get(node);
+            if (node < nLeaves) {
+                mid.set(node, pos.get(node));
+                return pos.get(node);
+            }
+            const [a, b] = children.get(node);
+            const m = (getMid(a) + getMid(b)) / 2;
+            mid.set(node, m);
+            return m;
+        }
+        getMid(root);
+
+        // Emit the classic “U” for every merge
+        const segments = [];
+        for (const [node, [a, b]] of children) {
+            const ha = height.get(a);
+            const hb = height.get(b);
+            const hMerge = height.get(node);
+            const xa = getMid(a);
+            const xb = getMid(b);
+
+            // vertical leg A
+            segments.push({ x1: ha, y1: 2 * xa, x2: hMerge, y2: 2 * xa });
+            // vertical leg B
+            segments.push({ x1: hb, y1: 2 * xb, x2: hMerge, y2: 2 * xb });
+            // horizontal connector
+            segments.push({ x1: hMerge, y1: 2 * xa, x2: hMerge, y2: 2 * xb });
+        }
+        return segments;
+    }
+
+    const dendSegments = linkageToSegments(h.dendrogram, n);
+
+    // Max height → how much horizontal space the dendrogram needs
+    const maxHeight = dendSegments.length
+        ? Math.max(...dendSegments.map(s => Math.max(s.x1, s.x2)))
+        : 1;
+
+    // Layout
     const cellSize = n > 35 ? 14 : n > 20 ? 18 : 26;
-
-    const plotWidth = Math.max(
-        200,
-        Math.ceil((n + 2) * cellSize)
-    );
-
-    const plotHeight = Math.max(
-        150,
-        Math.ceil(2 * n * cellSize)
-    );
+    const dendWidth = Math.max(80, maxHeight * 40);   // pixels for dendrogram
+    const heatWidth = Math.max(200, Math.ceil((n + 2) * cellSize));
+    const plotHeight = Math.max(150, Math.ceil(2 * n * cellSize));
 
     const diamond_scale = 1.5;
     const diamondSize = cellSize * cellSize * 2 * diamond_scale;
 
-
-    // Vega-Lite specification
-    const mySpec = {
-        $schema: "https://vega.github.io/schema/vega-lite/v6.json",
-        description: "Stained-glass upper-triangle heatmap",
-
-        width: plotWidth,
+    // ------------------------------------------------------------------
+    // Vega-Lite: dendrogram (left) + heatmap (right) via hconcat
+    // ------------------------------------------------------------------
+    const dendSpec = {
+        width: dendWidth,
         height: plotHeight,
+        data: { values: dendSegments },
+        mark: {
+            type: "rule",
+            strokeWidth: 1.5,
+            color: "#333"
+        },
+        encoding: {
+            // distance grows to the left → reverse the x domain
+            x: {
+                field: "x1",
+                type: "quantitative",
+                scale: { domain: [maxHeight * 1.05, 0], nice: false },
+                axis: null
+            },
+            x2: { field: "x2" },
+            y: {
+                field: "y1",
+                type: "quantitative",
+                scale: { domain: [2 * n, 0], nice: false, zero: false },
+                axis: null
+            },
+            y2: { field: "y2" }
+        }
+    };
 
-        background: "white",
-
+    const heatSpec = {
+        width: heatWidth,
+        height: plotHeight,
         layer: [
             {
-                // Diamond-shaped heatmap cells.
-                data: {
-                    values: cells
-                },
-
+                data: { values: cells },
                 mark: {
                     type: "point",
                     shape: "diamond",
@@ -975,30 +1057,19 @@ for (let key in objects.datasets) {
                     size: diamondSize,
                     tooltip: true
                 },
-
                 encoding: {
                     x: {
                         field: "xRot",
                         type: "quantitative",
-                        scale: {
-                            domain: [-2, n],
-                            nice: false,
-                            zero: false
-                        },
+                        scale: { domain: [-2, n], nice: false, zero: false },
                         axis: null
                     },
-
                     y: {
                         field: "yRot",
                         type: "quantitative",
-                        scale: {
-                            domain: [2 * n, 0],
-                            nice: false,
-                            zero: false
-                        },
+                        scale: { domain: [2 * n, 0], nice: false, zero: false },
                         axis: null
                     },
-
                     color: {
                         field: "value",
                         type: "quantitative",
@@ -1007,38 +1078,17 @@ for (let key in objects.datasets) {
                             interpolate: "cubehelix",
                             domainMax: 1.0
                         },
-                        legend: {
-                            title: "Similarity"
-                        }
+                        legend: { title: "Similarity" }
                     },
-
                     tooltip: [
-                        {
-                            field: "y",
-                            type: "nominal",
-                            title: "Row"
-                        },
-                        {
-                            field: "x",
-                            type: "nominal",
-                            title: "Column"
-                        },
-                        {
-                            field: "value",
-                            type: "quantitative",
-                            title: "Value",
-                            format: ".3f"
-                        }
+                        { field: "y", type: "nominal", title: "Row" },
+                        { field: "x", type: "nominal", title: "Column" },
+                        { field: "value", type: "quantitative", title: "Value", format: ".3f" }
                     ]
                 }
             },
-
             {
-                // Horizontal labels along the left side.
-                data: {
-                    values: labelData
-                },
-
+                data: { values: labelData },
                 mark: {
                     type: "text",
                     align: "right",
@@ -1046,64 +1096,44 @@ for (let key in objects.datasets) {
                     fontSize: n > 35 ? 10 : 13,
                     color: "black"
                 },
-
                 encoding: {
                     x: {
                         field: "xRot",
                         type: "quantitative",
-                        scale: {
-                            domain: [-2, n],
-                            nice: false,
-                            zero: false
-                        },
+                        scale: { domain: [-2, n], nice: false, zero: false },
                         axis: null
                     },
-
                     y: {
                         field: "yRot",
                         type: "quantitative",
-                        scale: {
-                            domain: [2 * n, 0],
-                            nice: false,
-                            zero: false
-                        },
+                        scale: { domain: [2 * n, 0], nice: false, zero: false },
                         axis: null
                     },
-
-                    text: {
-                        field: "label",
-                        type: "nominal"
-                    }
+                    text: { field: "label", type: "nominal" }
                 }
             }
-        ],
+        ]
+    };
 
+    const mySpec = {
+        $schema: "https://vega.github.io/schema/vega-lite/v6.json",
+        description: "Dendrogram + stained-glass upper-triangle heatmap",
+        background: "white",
+        hconcat: [dendSpec, heatSpec],
         resolve: {
-            scale: {
-                x: "shared",
-                y: "shared"
-            }
+            scale: { y: "shared" }   // critical: same leaf positions
         },
-
         config: {
-            view: {
-                stroke: null
-            },
-            axis: {
-                grid: false
-            }
+            view: { stroke: null },
+            axis: { grid: false },
+            concat: { spacing: 4 }
         }
     };
 
-
-    const opt = {
-        actions: false
-    };
+    const opt = { actions: false };
 
     vegaEmbed(`#${CSS.escape(thisId)}`, mySpec, opt)
         .then(({ view, spec }) => {
-
-            // Helper to download the current chart as an image.
             function downloadImage(format, filename) {
                 view.toImageURL(format).then(url => {
                     const a = document.createElement("a");
@@ -1113,40 +1143,17 @@ for (let key in objects.datasets) {
                     a.click();
                     a.remove();
                 }).catch(err => {
-                    console.error(
-                        `Could not export heatmap as ${format}:`,
-                        err
-                    );
+                    console.error(`Could not export heatmap as ${format}:`, err);
                 });
             }
 
-            // PNG export.
-            const pngButton = document.getElementById(
-                'btn-download-plot-png-' + h.id
-            );
+            const pngButton = document.getElementById('btn-download-plot-png-' + h.id);
+            if (pngButton) pngButton.onclick = () => downloadImage("png", "visualization.png");
 
-            if (pngButton) {
-                pngButton.onclick = () => {
-                    downloadImage("png", "visualization.png");
-                };
-            }
+            const svgButton = document.getElementById('btn-download-plot-svg-' + h.id);
+            if (svgButton) svgButton.onclick = () => downloadImage("svg", "visualization.svg");
 
-            // SVG export.
-            const svgButton = document.getElementById(
-                'btn-download-plot-svg-' + h.id
-            );
-
-            if (svgButton) {
-                svgButton.onclick = () => {
-                    downloadImage("svg", "visualization.svg");
-                };
-            }
-
-            // Open in Vega Editor.
-            const editorButton = document.getElementById(
-                'btn-download-plot-vega-editor-' + h.id
-            );
-
+            const editorButton = document.getElementById('btn-download-plot-vega-editor-' + h.id);
             if (editorButton) {
                 editorButton.onclick = () => {
                     post_to_vega_editor(window, {
