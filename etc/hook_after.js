@@ -880,6 +880,9 @@ for (let key in objects.datasets) {
 
 } else if (element instanceof Heatmap) {
     const h = element;
+    console.log("=============");
+    console.log(h.dendrogram);
+    console.log("===============");
     const thisId = 'chart-heatmap-' + h.id;
 
     const sourceValues = Array.isArray(h.data_set)
