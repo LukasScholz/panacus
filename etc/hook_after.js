@@ -888,149 +888,136 @@ for (let key in objects.datasets) {
 
     if (!Array.isArray(sourceValues)) {
         throw new Error(
-            'Heatmap requires h.data_set.values to be an array ' +
-            'of {x, y, value} records.'
+            'Heatmap requires h.data_set.values to be an array of {x, y, value} records.'
         );
     }
 
-    const labels = [...new Set(sourceValues.map(d => d.x))];
-    const index = new Map(labels.map((label, i) => [label, i]));
-    const n = labels.length;
+    const steps = h.dendrogram || [];
+    const rawLabels = [...new Set(sourceValues.map(d => d.x))];
+    const n = rawLabels.length;
 
-    // ------------------------------------------------------------------
-    // Heatmap cells (unchanged)
-    // ------------------------------------------------------------------
+    const children = new Map();
+
+    steps.forEach((s, k) => {
+        const node = n + k;
+        children.set(node, [s.cluster1, s.cluster2]);
+    });
+
+
+    const leafOrder = [];
+    function dfs(node) {
+        if (node < n) { leafOrder.push(node); return; }
+        const [a, b] = children.get(node);
+        dfs(a); dfs(b);
+    }
+    if (steps.length) dfs(n + steps.length - 1);
+    else for (let i = 0; i < n; i++) leafOrder.push(i);
+
+    const pos = new Map(leafOrder.map((leaf, i) => [leaf, i]));
+
+    const rustOrder = [];
+    const seen = new Set();
+    for (const s of steps) {
+        for (const c of [s.cluster1, s.cluster2]) {
+            if (c < n && !seen.has(c)) {
+                rustOrder.push(c);
+                seen.add(c);
+            }
+        }
+    }
+    for (let i = 0; i < n; i++) if (!seen.has(i)) rustOrder.push(i);
+
+    const originalToLabel = new Map();
+    rustOrder.forEach((orig, rustRow) => {
+        originalToLabel.set(orig, rawLabels[rustRow]);
+    });
+    const labels = leafOrder.map(orig => originalToLabel.get(orig));
+
+    // reorder cells
+    const labelToNewRow = new Map(labels.map((l, i) => [l, i]));
     const cells = sourceValues
-        .filter(d => {
-            const row = index.get(d.y);
-            const col = index.get(d.x);
-            return row !== undefined && col !== undefined && row < col;
-        })
         .map(d => {
-            const i = index.get(d.y);
-            const j = index.get(d.x);
+            const newR = labelToNewRow.get(d.y);
+            const newC = labelToNewRow.get(d.x);
+            if (newR === undefined || newC === undefined || newR >= newC) return null;
             return {
-                x: d.x,
-                y: d.y,
-                value: d.value,
-                xRot: j - i,
-                yRot: i + j
+                x: d.x, y: d.y, value: d.value,
+                xRot: newC - newR,
+                yRot: newR + newC
             };
-        });
+        })
+        .filter(Boolean);
 
     const labelData = labels.map((label, i) => ({
-        label: label,
-        xRot: -1.25,
-        yRot: 2 * i
+        label, xRot: -1.25, yRot: 2 * i
     }));
 
-    // ------------------------------------------------------------------
-    // Dendrogram → line segments
-    // h.dendrogram = [{cluster1, cluster2, dissimilarity, size}, ...]
-    // Leaf indices 0..n-1 refer to the ORIGINAL order before reordering.
-    // Because the matrix/labels were already reordered to the dendrogram
-    // leaf order, we map original → current position via a leaf-order walk.
-    // ------------------------------------------------------------------
-    function linkageToSegments(steps, nLeaves) {
-        if (!steps || steps.length === 0) return [];
 
-        // Build children: node → [left, right]
-        const children = new Map();
-        const height = new Map();          // node → dissimilarity
-        for (let i = 0; i < nLeaves; i++) height.set(i, 0);
+    // Cladogramm equal horizontal step per merge
+    const rankHeight = new Map();
+    for (let i = 0; i < n; i++) rankHeight.set(i, 0);
 
-        steps.forEach((s, k) => {
-            const node = nLeaves + k;     // kodama internal node ids
-            children.set(node, [s.cluster1, s.cluster2]);
-            height.set(node, s.dissimilarity);
-        });
+    function depth(node) {
+        if (rankHeight.has(node) && node >= n) return rankHeight.get(node);
+        if (node < n) return 0;
+        const [a, b] = children.get(node);
+        const d = 1 + Math.max(depth(a), depth(b));
+        rankHeight.set(node, d);
+        return d;
+    }
+    if (steps.length) depth(n + steps.length - 1);
 
-        const root = nLeaves + steps.length - 1;
-
-        // DFS leaf order (matches typical linkage leaf order)
-        const leafOrder = [];
-        function dfs(node) {
-            if (node < nLeaves) {
-                leafOrder.push(node);
-                return;
-            }
-            const [a, b] = children.get(node);
-            dfs(a);
-            dfs(b);
+    const mid = new Map();
+    function getMid(node) {
+        if (mid.has(node)) return mid.get(node);
+        if (node < n) {
+            mid.set(node, pos.get(node));
+            return pos.get(node);
         }
-        dfs(root);
+        const [a, b] = children.get(node);
+        const m = (getMid(a) + getMid(b)) / 2;
+        mid.set(node, m);
+        return m;
+    }
+    if (steps.length) getMid(n + steps.length - 1);
 
-        // original leaf index → position along the heatmap (0 .. n-1)
-        const pos = new Map(leafOrder.map((leaf, i) => [leaf, i]));
+    const dendSegments = [];
+    for (const [node, [a, b]] of children) {
+        const ha = rankHeight.get(a) || 0;
+        const hb = rankHeight.get(b) || 0;
+        const hm = rankHeight.get(node);
+        const ya = 2 * mid.get(a);
+        const yb = 2 * mid.get(b);
 
-        // mid-point of every cluster in leaf-position space
-        const mid = new Map();
-        function getMid(node) {
-            if (mid.has(node)) return mid.get(node);
-            if (node < nLeaves) {
-                mid.set(node, pos.get(node));
-                return pos.get(node);
-            }
-            const [a, b] = children.get(node);
-            const m = (getMid(a) + getMid(b)) / 2;
-            mid.set(node, m);
-            return m;
-        }
-        getMid(root);
-
-        // Emit the classic “U” for every merge
-        const segments = [];
-        for (const [node, [a, b]] of children) {
-            const ha = height.get(a);
-            const hb = height.get(b);
-            const hMerge = height.get(node);
-            const xa = getMid(a);
-            const xb = getMid(b);
-
-            // vertical leg A
-            segments.push({ x1: ha, y1: 2 * xa, x2: hMerge, y2: 2 * xa });
-            // vertical leg B
-            segments.push({ x1: hb, y1: 2 * xb, x2: hMerge, y2: 2 * xb });
-            // horizontal connector
-            segments.push({ x1: hMerge, y1: 2 * xa, x2: hMerge, y2: 2 * xb });
-        }
-        return segments;
+        dendSegments.push({ x1: ha, y1: ya, x2: hm, y2: ya });
+        dendSegments.push({ x1: hm, y1: ya, x2: hm, y2: yb });
+        dendSegments.push({ x1: hm, y1: yb, x2: hb, y2: yb });
     }
 
-    const dendSegments = linkageToSegments(h.dendrogram, n);
+    const maxRank = Math.max(1, ...[...rankHeight.values()]);
 
-    // Max height → how much horizontal space the dendrogram needs
-    const maxHeight = dendSegments.length
-        ? Math.max(...dendSegments.map(s => Math.max(s.x1, s.x2)))
-        : 1;
+    const cellSize    = n > 35 ? 14 : n > 20 ? 18 : 26;
+    const dendWidth   = Math.max(180, maxRank * 10);   // 10 pixel per clade
+    const heatWidth   = Math.max(280, Math.ceil((n + 2) * cellSize));
+    const plotHeight  = Math.max(180, Math.ceil(2 * n * cellSize));
+    const diamondSize = cellSize * cellSize * 2 * 1.5;
 
-    // Layout
-    const cellSize = n > 35 ? 14 : n > 20 ? 18 : 26;
-    const dendWidth = Math.max(80, maxHeight * 40);   // pixels for dendrogram
-    const heatWidth = Math.max(200, Math.ceil((n + 2) * cellSize));
-    const plotHeight = Math.max(150, Math.ceil(2 * n * cellSize));
 
-    const diamond_scale = 1.5;
-    const diamondSize = cellSize * cellSize * 2 * diamond_scale;
-
-    // ------------------------------------------------------------------
-    // Vega-Lite: dendrogram (left) + heatmap (right) via hconcat
-    // ------------------------------------------------------------------
+    // Vega-Lite spec
     const dendSpec = {
         width: dendWidth,
         height: plotHeight,
         data: { values: dendSegments },
-        mark: {
-            type: "rule",
-            strokeWidth: 1.5,
-            color: "#333"
-        },
+        mark: { type: "rule", strokeWidth: 1.4, color: "#222" },
         encoding: {
-            // distance grows to the left → reverse the x domain
             x: {
                 field: "x1",
                 type: "quantitative",
-                scale: { domain: [maxHeight * 1.05, 0], nice: false },
+                scale: {
+                    domain: [maxRank + 0.4, 0],
+                    nice: false,
+                    zero: false
+                },
                 axis: null
             },
             x2: { field: "x2" },
@@ -1120,19 +1107,15 @@ for (let key in objects.datasets) {
         description: "Dendrogram + stained-glass upper-triangle heatmap",
         background: "white",
         hconcat: [dendSpec, heatSpec],
-        resolve: {
-            scale: { y: "shared" }   // critical: same leaf positions
-        },
+        resolve: { scale: { y: "shared" } },
         config: {
             view: { stroke: null },
             axis: { grid: false },
-            concat: { spacing: 4 }
+            concat: { spacing: 8 }
         }
     };
 
-    const opt = { actions: false };
-
-    vegaEmbed(`#${CSS.escape(thisId)}`, mySpec, opt)
+    vegaEmbed(`#${CSS.escape(thisId)}`, mySpec, { actions: false })
         .then(({ view, spec }) => {
             function downloadImage(format, filename) {
                 view.toImageURL(format).then(url => {
@@ -1142,9 +1125,7 @@ for (let key in objects.datasets) {
                     document.body.appendChild(a);
                     a.click();
                     a.remove();
-                }).catch(err => {
-                    console.error(`Could not export heatmap as ${format}:`, err);
-                });
+                }).catch(err => console.error(`Could not export as ${format}:`, err));
             }
 
             const pngButton = document.getElementById('btn-download-plot-png-' + h.id);
@@ -1155,20 +1136,13 @@ for (let key in objects.datasets) {
 
             const editorButton = document.getElementById('btn-download-plot-vega-editor-' + h.id);
             if (editorButton) {
-                editorButton.onclick = () => {
-                    post_to_vega_editor(window, {
-                        mode: "vega-lite",
-                        spec: JSON.stringify(spec, null, 2),
-                        renderer: undefined,
-                        config: undefined
-                    });
-                };
+                editorButton.onclick = () => post_to_vega_editor(window, {
+                    mode: "vega-lite",
+                    spec: JSON.stringify(spec, null, 2)
+                });
             }
         })
-        .catch(err => {
-            console.error("Could not render heatmap:", err);
-        });
-
+        .catch(err => console.error("Could not render heatmap:", err));
 } else if (element instanceof VegaPlot) {
         let v = element;
         let thisId = 'chart-line-' + v.id;
